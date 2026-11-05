@@ -168,8 +168,12 @@ def configuration() -> None:
 
 
 def upload_report(result: CaseAuditResult, opener) -> str:
+    return upload_html(html_report(result), result.case_id + '-investigation.html',
+                       result.case_id + ' - Full HTML Investigation Report', opener)
+
+
+def upload_html(content: bytes, filename: str, title: str, opener) -> str:
     token, channel = upload_config()
-    content = html_report(result)
 
     def api(method, data):
         encoded = urlencode({key: json.dumps(value) if isinstance(value, (list, dict)) else value
@@ -191,7 +195,7 @@ def upload_report(result: CaseAuditResult, opener) -> str:
                 raise SlackError(errors.get(code, 'Slack could not complete the report upload. Check bot permissions and channel access.'))
             return value
 
-    ticket = api('files.getUploadURLExternal', {'filename': result.case_id + '-investigation.html', 'length': len(content)})
+    ticket = api('files.getUploadURLExternal', {'filename': filename, 'length': len(content)})
     upload_url, file_id = ticket.get('upload_url', ''), ticket.get('file_id', '')
     try:
         parsed = urlsplit(upload_url)
@@ -207,7 +211,7 @@ def upload_report(result: CaseAuditResult, opener) -> str:
         if response.status != 200:
             raise SlackError('Slack did not accept the HTML report upload.')
     completed = api('files.completeUploadExternal', {
-        'files': [{'id': file_id, 'title': result.case_id + ' - Full HTML Investigation Report'}], 'channel_id': channel})
+        'files': [{'id': file_id, 'title': title}], 'channel_id': channel})
     if not any(isinstance(f, dict) and f.get('id') == file_id for f in completed.get('files', [])):
         raise SlackError('Slack did not confirm the uploaded report.')
     info = api('files.info', {'file': file_id})
@@ -224,12 +228,29 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def deliver(result: CaseAuditResult) -> None:
+    _deliver(lambda opener: upload_report(result, opener), lambda link: payload(result, link))
+
+
+def deliver_usage(content: bytes) -> None:
+    def message(link):
+        link = report_link(link)
+        return {'text': 'EraSight — Model Usage & Cost Report\n' + link, 'blocks': [
+            {'type': 'header', 'text': {'type': 'plain_text', 'text': 'EraSight — Model Usage & Cost Report', 'emoji': False}},
+            {'type': 'section', 'text': {'type': 'plain_text', 'text':
+                'Deterministic investigation: 0 LLM calls. Recorded optional advisory runs and pricing assumptions are reported separately.'}},
+            {'type': 'section', 'text': {'type': 'mrkdwn', 'text':
+                f'<{link}|Download Model Usage Report (HTML)> (Slack sign-in required)'}},
+        ], 'unfurl_links': False, 'unfurl_media': False}
+    _deliver(lambda opener: upload_html(content, 'erasight-model-usage.html', 'EraSight Model Usage & Cost Report', opener), message)
+
+
+def _deliver(upload, message) -> None:
     url = webhook_url()
     upload_config()
     try:
         opener = build_opener(NoRedirect())
-        link = upload_report(result, opener)
-        request = Request(url, data=json.dumps(payload(result, link)).encode('utf-8'),
+        link = upload(opener)
+        request = Request(url, data=json.dumps(message(link)).encode('utf-8'),
                           headers={'Content-Type': 'application/json; charset=utf-8'}, method='POST')
         with opener.open(request, timeout=10) as response:
             if response.status != 200 or response.read(64).strip() != b'ok':

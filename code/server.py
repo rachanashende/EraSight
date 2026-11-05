@@ -21,7 +21,8 @@ from urllib.parse import urlsplit
 from advisor.envfile import load_env
 from engine.case_analyzer import build_context
 from engine.pipeline import run_cases
-from notifications.slack import CASE_ID, SlackError, deliver, configuration
+from notifications.slack import CASE_ID, SlackError, deliver, deliver_usage, configuration
+from notifications.usage_report import html_usage_report
 from presentation import present
 from integrations.email.email_service import build_service_from_env
 from integrations.email.http_adapter import EmailHttpAdapter, MAX_BODY, PREFIX
@@ -161,6 +162,24 @@ class Handler(BaseHTTPRequestHandler):
                               f'erasight_session={sid}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=3600')
         if self.path == '/api/cases':
             return self.reply(200, [present(r, self.server.requests.get(r.case_id)) for r in self.server.results.values()])
+        if self.path == '/api/reports/model-usage.html':
+            if not self.session():
+                return self.reply(403, {'error': 'Report session expired. Refresh and try again.'})
+            content = html_usage_report(len(self.server.results))
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Disposition', 'attachment; filename="erasight-model-usage.html"')
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            origin = self.headers.get('Origin')
+            if origin in ORIGINS:
+                self.send_header('Access-Control-Allow-Origin', origin)
+                self.send_header('Access-Control-Allow-Credentials', 'true')
+                self.send_header('Vary', 'Origin')
+            self.end_headers()
+            self.wfile.write(content)
+            return
         return self.reply(404, {'error': 'Endpoint not found.'})
 
     def do_POST(self):
@@ -173,13 +192,14 @@ class Handler(BaseHTTPRequestHandler):
         if not session or not hmac.compare_digest(token.encode('utf-8'), session['csrf'].encode('ascii')):
             return self.reply(403, {'error': 'Notification session expired. Refresh and try again.'})
         parts = self.path.split('/')
-        if len(parts) != 5 or parts[1:3] != ['api', 'cases'] or parts[4] != 'slack':
+        usage = self.path == '/api/reports/model-usage/slack'
+        if not usage and (len(parts) != 5 or parts[1:3] != ['api', 'cases'] or parts[4] != 'slack'):
             return self.reply(404, {'error': 'Endpoint not found.'})
-        case_id = parts[3]
-        if not CASE_ID.fullmatch(case_id):
+        case_id = 'model-usage' if usage else parts[3]
+        if not usage and not CASE_ID.fullmatch(case_id):
             return self.reply(400, {'error': 'Invalid case ID. Demo cases cannot be sent.'})
         result = self.server.results.get(case_id)
-        if not result:
+        if not usage and not result:
             return self.reply(404, {'error': 'Case not found. Refresh the engine results.'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
@@ -198,13 +218,16 @@ class Handler(BaseHTTPRequestHandler):
             if now - self.server.last_send < 1:
                 return self.reply(429, {'error': 'Please wait a moment before sending another Slack notification.'})
             try:
-                deliver(result)
+                if usage:
+                    deliver_usage(html_usage_report(len(self.server.results)))
+                else:
+                    deliver(result)
             except SlackError as error:
                 return self.reply(error.status, {'error': str(error)})
             except Exception:
                 return self.reply(502, {'error': 'Slack delivery could not be confirmed. Check the channel before retrying.'})
             self.server.sent[case_id] = self.server.last_send = time.monotonic()
-            return self.reply(200, {'status': 'sent', 'case_id': case_id})
+            return self.reply(200, {'status': 'sent', 'report': 'model-usage'} if usage else {'status': 'sent', 'case_id': case_id})
         finally:
             self.server.delivery_lock.release()
 
@@ -224,19 +247,23 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
     try:
-    results = load_results(args.dataset)
-    with (args.dataset / 'deletion_requests.csv').open(encoding='utf-8', newline='') as request_file:
-    requests = list(csv.DictReader(request_file))
-    with ApiServer(('127.0.0.1', args.port), results, requests) as server:
-    server.email = EmailHttpAdapter(
-        build_service_from_env(), Operators.from_env(os.environ),
-        case_provider=lambda cid: server.results[cid].to_dict() if cid in server.results else None)
-    print(f'EraSight local API: http://127.0.0.1:{args.port} ({len(results)} engine cases)')
-    server.serve_forever()
+        results = load_results(args.dataset)
+        with (args.dataset / 'deletion_requests.csv').open(encoding='utf-8', newline='') as request_file:
+            requests = list(csv.DictReader(request_file))
+
+        host = '127.0.0.1'
+        port = int(os.environ.get('PORT', args.port))
+
+        with ApiServer((host, port), results, requests) as server:
+            server.email = EmailHttpAdapter(
+                build_service_from_env(), Operators.from_env(os.environ),
+                case_provider=lambda cid: server.results[cid].to_dict() if cid in server.results else None)
+            print(f'EraSight API: http://{host}:{port} ({len(results)} engine cases)', flush=True)
+            server.serve_forever()
     except KeyboardInterrupt:
-    pass
+        pass
     except Exception:
-    raise SystemExit('Unable to start the local API. Check the dataset, required parser tools and port. No credentials were logged.') from None
+        raise SystemExit('Unable to start the local API. Check the dataset, required parser tools and port. No credentials were logged.') from None
 
 
 if __name__ == '__main__':
