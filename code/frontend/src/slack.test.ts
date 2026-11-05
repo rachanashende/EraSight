@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sendSlackReport } from './slack';
+import { sendSlackReport, downloadUsageReport, sendUsageReport } from './slack';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 test('Slack sends only the case ID with session credentials and CSRF protection', async () => {
@@ -58,5 +58,53 @@ test('Older text-only servers are rejected before any Slack post', async () => {
   try {
     await assert.rejects(sendSlackReport('', 'case_1'), /Restart the EraSight backend/);
     assert.equal(calls, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test('Usage share sends an empty request with session credentials and current CSRF', async () => {
+  const original = globalThis.fetch;
+  const calls: { url: string; options?: RequestInit }[] = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return calls.length === 1 ? json({ csrf_token: 'temporary-csrf', slack_configured: true, slack_report_format: 'html-v1' }) : json({ status: 'sent', report: 'model-usage' });
+  };
+  try {
+    await sendUsageReport('');
+    assert.equal(calls[1].url, '/api/reports/model-usage/slack');
+    assert.equal(calls[1].options?.credentials, 'include');
+    assert.equal(calls[1].options?.body, '{}');
+    assert.equal((calls[1].options?.headers as Record<string, string>)['X-CSRF-Token'], 'temporary-csrf');
+    assert.equal((calls[1].options?.headers as Record<string, string>).Authorization, undefined);
+  } finally { globalThis.fetch = original; }
+});
+
+test('Usage HTML download authenticates the session and works without Slack configuration', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(options?.credentials, 'include');
+    return ++calls === 1 ? json({ csrf_token: 'csrf', slack_configured: false, slack_report_format: 'html-v1' }) :
+      new Response('<!doctype html><title>Usage</title>', { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+  };
+  try { assert.match(await (await downloadUsageReport('')).text(), /Usage/); }
+  finally { globalThis.fetch = original; }
+});
+
+for (const status of [403, 409, 429, 502, 503]) test(`Usage Slack failure ${status} cannot claim success or expose upstream data`, async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => ++calls === 1 ? json({ csrf_token: 'csrf', slack_configured: true, slack_report_format: 'html-v1' }) : json({ error: 'private credentials' }, status);
+  try { await assert.rejects(sendUsageReport(''), error => error instanceof Error && !error.message.includes('private credentials')); }
+  finally { globalThis.fetch = original; }
+});
+
+test('Usage delivery rejects unconfirmed success and download rejects non-HTML responses', async () => {
+  const original = globalThis.fetch;
+  try {
+    let calls = 0;
+    globalThis.fetch = async () => ++calls === 1 ? json({ csrf_token: 'csrf', slack_configured: true, slack_report_format: 'html-v1' }) : json({ status: 'sent', case_id: 'case_1' });
+    await assert.rejects(sendUsageReport(''), /could not be confirmed/);
+    calls = 0;
+    await assert.rejects(downloadUsageReport(''), /unavailable/);
   } finally { globalThis.fetch = original; }
 });

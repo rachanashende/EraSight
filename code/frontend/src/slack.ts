@@ -1,8 +1,8 @@
 /** Slack requests carry only a case ID; the backend owns message content and secrets. */
-async function slackRequest(base: string, path: string, options: RequestInit = {}) {
+async function slackRequest(base: string, path: string, options: RequestInit = {}, timeout = 15000) {
   let response: Response;
   try {
-    response = await fetch(`${base}${path}`, { ...options, credentials: 'include', signal: AbortSignal.timeout(15000) });
+    response = await fetch(`${base}${path}`, { ...options, credentials: 'include', signal: AbortSignal.timeout(timeout) });
   } catch {
     throw new Error('Slack delivery could not be confirmed. Check the channel and that the local API is running before retrying.');
   }
@@ -19,6 +19,27 @@ async function slackRequest(base: string, path: string, options: RequestInit = {
     throw new Error(errors[response.status] || 'Slack delivery could not be confirmed. Check the channel before retrying.');
   }
   return data;
+}
+
+export async function downloadUsageReport(base: string) {
+  await getSlackSession(base);
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api/reports/model-usage.html`, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+  } catch { throw new Error('Model usage report could not be downloaded. Check the local API and try again.'); }
+  if (!response.ok || !response.headers.get('Content-Type')?.startsWith('text/html')) {
+    throw new Error(response.status === 403 ? 'Report session expired or origin rejected. Refresh and try again.' : 'Model usage report is unavailable. Restart the API and try again.');
+  }
+  return response.blob();
+}
+
+export async function sendUsageReport(base: string) {
+  const session = await getSlackSession(base);
+  if (!session.slack_configured) throw new Error('Slack is not configured on the server.');
+  const data = await slackRequest(base, '/api/reports/model-usage/slack', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrf_token }, body: '{}',
+  }, 45000);
+  if (data?.status !== 'sent' || data?.report !== 'model-usage') throw new Error('Slack delivery could not be confirmed. Check the channel before retrying.');
 }
 export async function getSlackSession(base: string) {
   const data = await slackRequest(base, '/api/session');
