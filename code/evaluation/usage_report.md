@@ -39,3 +39,22 @@ A lookalike-email demo on the small mini dataset, used only to show the advisory
 The code was written with an AI coding assistant (Claude Code). That usage is development tooling, not part of the
 submitted agent's run, and is recorded in the session transcript (`log.txt`) rather than measured here.
 To refresh this file after a model run: `python code/advise.py --model` then `python code/evaluation/generate_reports.py`.
+
+## Downloadable HTML usage report
+
+The source report lives at `code/evaluation/usage_report.md` in this checkout; there is no root `evaluation/usage_report.md`. The existing results above are preserved.
+
+The investigation Communication panel now provides **Model Usage Report** (HTML download) and **Send usage report to Slack**. Both use the local session; Slack sharing additionally requires the existing CSRF token, configured webhook, private-file bot permissions and channel membership. Downloading does not require Slack configuration.
+
+The HTML reads only the fixed aggregate logs `advisor_usage.json` and `advisor_usage_demo.json`; it never invokes a model, reads prompts, or sends per-case identities. Exact arithmetic from the currently recorded counts and the historical price assumption above gives:
+
+| Scope | Successful calls | Input tokens | Output tokens | Total tokens | Estimated USD |
+|---|---:|---:|---:|---:|---:|
+| Deterministic 518-case decision pipeline | 0 | 0 | 0 | 0 | 0.00 |
+| Full-dataset optional advisory | 6 | 1514 | 1757 | 3271 | 0.00128130 |
+| Separate mini-dataset advisory | 3 | 915 | 670 | 1585 | 0.00053925 |
+| All recorded advisory runs combined | 9 | 2429 | 2427 | 4856 | 0.00182055 |
+
+Both logs record zero failed calls. The combined row describes separate advisory runs, not the decision pipeline or its per-request cost. Recorded rates apply only to Groq / openai/gpt-oss-120b: input USD 0.15 and output USD 0.60 per million tokens. They are historical assumptions, not newly verified current prices or a provider bill.
+
+Neither aggregate log records a run timestamp, and the mini log does not record its dataset request count. These fields display **Not recorded**; file timestamps and HTML generation time are not substituted. Missing/invalid logs, missing token breakdowns and unknown model prices also display **Not recorded**; unknown values propagate to totals and prevent a complete cost estimate. The current log schema counts successful advisory calls separately from failed calls; HTTP retry attempts are not separately recorded. Legacy clients defaulted absent provider usage fields to zero, so a recorded zero alone does not prove the provider returned usage metadata. No new advisory run was performed for this feature.
