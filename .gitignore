@@ -24,3 +24,5 @@ email_outbox.db-*
 code.zip
 agent-trace/
 agent-trace.zip
+
+code/frontend/.vite/
